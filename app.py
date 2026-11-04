@@ -1,9 +1,12 @@
-import os, sqlite3, secrets, hashlib, hmac, json, time, socket, threading
+import os, sqlite3, secrets, hashlib, hmac, json, time, socket, threading, textwrap
 from urllib import request as urlrequest, parse as urlparse
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Flask, request, jsonify, session, render_template
 from werkzeug.middleware.proxy_fix import ProxyFix
+from PIL import Image, ImageDraw, ImageFont
+from brother_ql.raster import BrotherQLRaster
+from brother_ql.conversion import convert as brother_convert
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
@@ -20,7 +23,10 @@ LOGIN_ATTEMPTS = {}
 PRINT_MODE = os.environ.get('PRINT_MODE','mock').lower()
 EPSON_HOST = os.environ.get('EPSON_HOST','')
 EPSON_PORT = int(os.environ.get('EPSON_PORT','9100'))
-BROTHER_URL = os.environ.get('BROTHER_URL','http://192.168.1.149:8013/api/print/text')
+CHIT_COLUMNS = int(os.environ.get('CHIT_COLUMNS','32'))
+BROTHER_HOST = os.environ.get('BROTHER_HOST','192.168.1.156')
+BROTHER_PORT = int(os.environ.get('BROTHER_PORT','9100'))
+BROTHER_MODEL = os.environ.get('BROTHER_MODEL','QL-820NWB')
 BROTHER_LABEL_SIZE = os.environ.get('BROTHER_LABEL_SIZE','62')
 
 def db():
@@ -319,6 +325,16 @@ def delete_modifier_option(option_id):
     with db() as c:c.execute('DELETE FROM modifier_options WHERE id=?',(option_id,))
     return jsonify(ok=True)
 
+@app.patch('/api/modifier-options/<int:option_id>')
+@admin
+def update_modifier_option(option_id):
+    name=str((request.get_json(silent=True) or {}).get('name','')).strip()
+    if not name:return jsonify(error='Name required'),400
+    try:
+        with db() as c:c.execute('UPDATE modifier_options SET name=? WHERE id=?',(name,option_id))
+    except sqlite3.IntegrityError:return jsonify(error='Option already exists'),409
+    return jsonify(ok=True)
+
 @app.put('/api/items/<int:item_id>/modifier-groups')
 @admin
 def set_item_modifier_groups(item_id):
@@ -403,28 +419,48 @@ def order_payload(order_id):
     return order
 
 def chit_bytes(order):
-    out=[f"COFFEE ORDER #{order['id']}",order['customer'],datetime.fromisoformat(order['created_at']).astimezone().strftime('%b %d  %I:%M %p'),'TO GO' if order['to_go'] else 'FOR HERE','-'*32]
+    def add(out,text,indent=''):
+        out.extend(textwrap.wrap(str(text),width=max(8,CHIT_COLUMNS-len(indent)),break_long_words=False,break_on_hyphens=False,subsequent_indent=indent) or [''])
+    out=[]; add(out,f"COFFEE ORDER #{order['id']}");add(out,order['customer']);add(out,datetime.fromisoformat(order['created_at']).astimezone().strftime('%b %d  %I:%M %p'));add(out,'TO GO' if order['to_go'] else 'FOR HERE');out.append('-'*CHIT_COLUMNS)
     for line in order['lines']:
-        out.append(f"{line['quantity']} x {line['name']}")
-        for group,values in line['modifiers'].items():out.append(f"  {group}: {', '.join(values)}")
-    if order['notes']:out.extend(['-'*32,'NOTE: '+order['notes']])
-    return b'\x1b@\x1ba\x00'+('\n'.join(out)+'\n\n\n').encode('utf-8','replace')+b'\x1dV\x00'
+        add(out,f"{line['quantity']} x {line['name']}")
+        for group,values in line['modifiers'].items():add(out,f"{group}: {', '.join(values)}",'  ')
+    if order['notes']:out.append('-'*CHIT_COLUMNS);add(out,'NOTE: '+order['notes'])
+    return b'\x1b@\x1ba\x00'+('\n'.join(out)+'\n\n\n\n\n\n').encode('utf-8','replace')+b'\x1dV\x00'
 
 def send_chit(order):
     if PRINT_MODE=='mock':return
     if not EPSON_HOST:raise RuntimeError('EPSON_HOST is not configured')
     with socket.create_connection((EPSON_HOST,EPSON_PORT),timeout=8) as s:s.sendall(chit_bytes(order))
 
+def label_font(size,bold=False):
+    names=['DejaVuSans-Bold.ttf','DejaVuSans.ttf'] if bold else ['DejaVuSans.ttf']
+    for name in names:
+        try:return ImageFont.truetype(name,size)
+        except OSError:pass
+    return ImageFont.load_default()
+
+def label_image(order,line):
+    width,height=696,1100; image=Image.new('L',(width,height),'white');d=ImageDraw.Draw(image);y=35
+    def block(text,size,bold=False,spacing=8):
+        nonlocal y
+        font=label_font(size,bold); avg=max(1,d.textlength('M',font=font)); chars=max(8,int((width-70)/avg))
+        for row in textwrap.wrap(str(text),chars,break_long_words=False) or ['']:
+            box=d.textbbox((0,0),row,font=font);x=(width-(box[2]-box[0]))//2;d.text((x,y),row,font=font,fill='black');y+=box[3]-box[1]+spacing
+    block(order['customer'].upper(),72,True,14);d.line((40,y,width-40,y),fill='black',width=4);y+=22
+    block(line['name'],64,True,16)
+    for group,values in line['modifiers'].items():block(f"{group}: {', '.join(values)}",42,False,10)
+    if order['notes']:y+=10;block(order['notes'],38,False,8)
+    y=max(y,height-115);block(f"TO GO  •  ORDER #{order['id']}",34,True,4)
+    return image
+
 def send_labels(order):
     if PRINT_MODE=='mock':return
+    if not BROTHER_HOST:raise RuntimeError('BROTHER_HOST is not configured')
     for line in order['lines']:
-        mod_text='; '.join(f"{k}: {', '.join(v)}" for k,v in line['modifiers'].items())
         for _ in range(line['quantity']):
-            text='\n'.join(x for x in [order['customer'],line['name'],mod_text,'TO GO',f"Order #{order['id']}"] if x)
-            data=urlparse.urlencode({'text':text,'font_size':'48','label_size':BROTHER_LABEL_SIZE,'align':'center','orientation':'standard','margin_top':'12','margin_bottom':'12','margin_left':'10','margin_right':'10'}).encode()
-            response=urlrequest.urlopen(urlrequest.Request(BROTHER_URL,data=data,method='POST'),timeout=15)
-            body=json.loads(response.read().decode() or '{}')
-            if not body.get('success'):raise RuntimeError(body.get('message','Brother label print failed'))
+            qlr=BrotherQLRaster(BROTHER_MODEL);brother_convert(qlr,[label_image(order,line)],BROTHER_LABEL_SIZE,cut=True,compress=True,rotate='0')
+            with socket.create_connection((BROTHER_HOST,BROTHER_PORT),timeout=12) as s:s.sendall(bytes(qlr.data))
 
 def process_print_job(job_id):
     with db() as c:

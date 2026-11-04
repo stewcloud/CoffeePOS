@@ -29,7 +29,10 @@
   <Config Name="Print Mode" Target="PRINT_MODE" Default="live" Mode="" Description="live sends jobs to printers; mock completes jobs without hardware output." Type="Variable" Display="always" Required="true" Mask="false">live</Config>
   <Config Name="Epson Printer Address" Target="EPSON_HOST" Default="" Mode="" Description="IP address or DNS name of the ESC/POS chit printer." Type="Variable" Display="always" Required="false" Mask="false"/>
   <Config Name="Epson Printer Port" Target="EPSON_PORT" Default="9100" Mode="" Description="Raw TCP printing port, normally 9100." Type="Variable" Display="advanced" Required="true" Mask="false">9100</Config>
-  <Config Name="Brother QL Web URL" Target="BROTHER_URL" Default="http://192.168.1.149:8013/api/print/text" Mode="" Description="brother-ql-web text printing endpoint." Type="Variable" Display="always" Required="true" Mask="false">http://192.168.1.149:8013/api/print/text</Config>
+  <Config Name="Chit Line Width" Target="CHIT_COLUMNS" Default="32" Mode="" Description="Printable characters per line. Lower this if text is clipped." Type="Variable" Display="advanced" Required="true" Mask="false">32</Config>
+  <Config Name="Brother Printer Address" Target="BROTHER_HOST" Default="192.168.1.156" Mode="" Description="Direct network address of the Brother QL printer." Type="Variable" Display="always" Required="true" Mask="false">192.168.1.156</Config>
+  <Config Name="Brother Printer Port" Target="BROTHER_PORT" Default="9100" Mode="" Description="Raw Brother raster printing port." Type="Variable" Display="advanced" Required="true" Mask="false">9100</Config>
+  <Config Name="Brother Model" Target="BROTHER_MODEL" Default="QL-820NWB" Mode="" Description="Brother QL model identifier." Type="Variable" Display="advanced" Required="true" Mask="false">QL-820NWB</Config>
   <Config Name="Brother Label Size" Target="BROTHER_LABEL_SIZE" Default="62" Mode="" Description="brother-ql media identifier, such as 62 or 62x29." Type="Variable" Display="always" Required="true" Mask="false">62</Config>
 </Container>
 
