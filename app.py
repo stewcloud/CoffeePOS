@@ -441,17 +441,21 @@ def label_font(size,bold=False):
     return ImageFont.load_default()
 
 def label_image(order,line):
-    width,height=696,1100; image=Image.new('L',(width,height),'white');d=ImageDraw.Draw(image);y=35
-    def block(text,size,bold=False,spacing=8):
+    # 62 mm continuous media is 696 dots across. Keep that as the label's
+    # long edge and feed only ~36 mm per drink instead of an 1100-dot banner.
+    width,height=696,410; image=Image.new('L',(width,height),'white');d=ImageDraw.Draw(image);y=18
+    def block(text,size,bold=False,spacing=5,align='left'):
         nonlocal y
-        font=label_font(size,bold); avg=max(1,d.textlength('M',font=font)); chars=max(8,int((width-70)/avg))
+        font=label_font(size,bold); avg=max(1,d.textlength('M',font=font)); chars=max(8,int((width-48)/avg))
         for row in textwrap.wrap(str(text),chars,break_long_words=False) or ['']:
-            box=d.textbbox((0,0),row,font=font);x=(width-(box[2]-box[0]))//2;d.text((x,y),row,font=font,fill='black');y+=box[3]-box[1]+spacing
-    block(order['customer'].upper(),72,True,14);d.line((40,y,width-40,y),fill='black',width=4);y+=22
-    block(line['name'],64,True,16)
-    for group,values in line['modifiers'].items():block(f"{group}: {', '.join(values)}",42,False,10)
-    if order['notes']:y+=10;block(order['notes'],38,False,8)
-    y=max(y,height-115);block(f"TO GO  •  ORDER #{order['id']}",34,True,4)
+            if y+size+spacing>height-42:return
+            box=d.textbbox((0,0),row,font=font);x=24 if align=='left' else (width-(box[2]-box[0]))//2
+            d.text((x,y),row,font=font,fill='black');y+=box[3]-box[1]+spacing
+    block(f"{order['customer'].upper()}   •   #{order['id']}",38,True,4);d.line((24,y,width-24,y),fill='black',width=3);y+=9
+    block(line['name'],46,True,6)
+    for group,values in line['modifiers'].items():block(f"{group}: {', '.join(values)}",27,False,3)
+    if order['notes']:block('NOTE: '+order['notes'],25,True,3)
+    d.text((24,height-34),'TO GO',font=label_font(24,True),fill='black')
     return image
 
 def send_labels(order):
