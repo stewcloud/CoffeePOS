@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>CoffeePOS</Name>
+  <Repository>ghcr.io/stewcloud/coffeepos:latest</Repository>
+  <Registry>https://github.com/stewcloud/CoffeePOS/pkgs/container/coffeepos</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/stewcloud/CoffeePOS/issues</Support>
+  <Project>https://github.com/stewcloud/CoffeePOS</Project>
+  <Overview>Self-hosted coffee ordering with blind PIN login, sections, modifiers, order chits, and to-go labels.</Overview>
+  <Category>Productivity: Other:</Category>
+  <WebUI>https://coffee.stewcloud.com/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/stewcloud/CoffeePOS/codex/v0.3-printing-sections-modifiers/unraid/CoffeePOS.xml</TemplateURL>
+  <Icon>https://github.com/stewcloud.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled>0</DateInstalled>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>For physical printing, configure the Epson network address and a reachable brother-ql-web endpoint.</Requires>
+  <Config Name="Web Port" Target="8541" Default="8541" Mode="tcp" Description="CoffeePOS web port" Type="Port" Display="always" Required="true" Mask="false">8541</Config>
+  <Config Name="Application Data" Target="/data" Default="/mnt/user/appdata/CoffeePOS/data" Mode="rw" Description="Persistent SQLite database and backups" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/CoffeePOS/data</Config>
+  <Config Name="Secret Key" Target="SECRET_KEY" Default="" Mode="" Description="Long random session-signing secret. Preserve this value across updates." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Initial Admin PIN" Target="ADMIN_PIN" Default="" Mode="" Description="Four digits; only used when creating an empty database." Type="Variable" Display="advanced" Required="true" Mask="true"/>
+  <Config Name="Secure Cookies" Target="COOKIE_SECURE" Default="true" Mode="" Description="Use true for the HTTPS Cloudflare URL." Type="Variable" Display="advanced" Required="true" Mask="false">true</Config>
+  <Config Name="Print Mode" Target="PRINT_MODE" Default="live" Mode="" Description="live sends jobs to printers; mock completes jobs without hardware output." Type="Variable" Display="always" Required="true" Mask="false">live</Config>
+  <Config Name="Epson Printer Address" Target="EPSON_HOST" Default="" Mode="" Description="IP address or DNS name of the ESC/POS chit printer." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="Epson Printer Port" Target="EPSON_PORT" Default="9100" Mode="" Description="Raw TCP printing port, normally 9100." Type="Variable" Display="advanced" Required="true" Mask="false">9100</Config>
+  <Config Name="Brother QL Web URL" Target="BROTHER_URL" Default="http://192.168.1.149:8013/api/print/text" Mode="" Description="brother-ql-web text printing endpoint." Type="Variable" Display="always" Required="true" Mask="false">http://192.168.1.149:8013/api/print/text</Config>
+  <Config Name="Brother Label Size" Target="BROTHER_LABEL_SIZE" Default="62" Mode="" Description="brother-ql media identifier, such as 62 or 62x29." Type="Variable" Display="always" Required="true" Mask="false">62</Config>
+</Container>
+

@@ -8,5 +8,11 @@ print queue. Chits print to an ESC/POS network printer and to-go labels print th
 `brother-ql-web`. Use `PRINT_MODE=mock` for testing or `PRINT_MODE=live` with `EPSON_HOST`,
 `EPSON_PORT`, `BROTHER_URL`, and `BROTHER_LABEL_SIZE` configured for hardware output.
 
-For internet access, place the app behind an authenticated reverse proxy such as Cloudflare
-Tunnel + Access. Do not publish port 8541 directly to the internet.
+For internet access, place the app behind an HTTPS reverse proxy such as Cloudflare Tunnel.
+Do not forward port 8541 directly from the router.
+
+## Unraid updates
+
+GitHub Actions publishes `ghcr.io/stewcloud/coffeepos:latest`. Install with
+`unraid/CoffeePOS.xml`; Unraid can then detect and apply image updates normally while preserving
+the `/data` mapping. Printer endpoints and modes are editable template variables.
