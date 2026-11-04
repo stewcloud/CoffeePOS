@@ -1,4 +1,5 @@
-import os, sqlite3, secrets, hashlib, hmac, json, time
+import os, sqlite3, secrets, hashlib, hmac, json, time, socket, threading
+from urllib import request as urlrequest, parse as urlparse
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Flask, request, jsonify, session, render_template
@@ -16,6 +17,11 @@ app.config.update(
 )
 DB = os.environ.get('DB_PATH', '/data/coffeepos.db')
 LOGIN_ATTEMPTS = {}
+PRINT_MODE = os.environ.get('PRINT_MODE','mock').lower()
+EPSON_HOST = os.environ.get('EPSON_HOST','')
+EPSON_PORT = int(os.environ.get('EPSON_PORT','9100'))
+BROTHER_URL = os.environ.get('BROTHER_URL','http://192.168.1.149:8013/api/print/text')
+BROTHER_LABEL_SIZE = os.environ.get('BROTHER_LABEL_SIZE','62')
 
 def db():
     os.makedirs(os.path.dirname(DB) or '.', exist_ok=True)
@@ -45,6 +51,10 @@ def login_allowed(ip):
 
 def login_failed(ip): LOGIN_ATTEMPTS.setdefault(ip,[]).append(time.time())
 
+def pin_owner(pin, exclude_id=None):
+    with db() as c: rows=c.execute('SELECT id,pin_hash FROM users').fetchall()
+    return next((r['id'] for r in rows if r['id'] != exclude_id and verify_pin(pin,r['pin_hash'])),None)
+
 def init():
     with db() as c:
         c.executescript("""
@@ -54,7 +64,16 @@ def init():
         CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), customer TEXT NOT NULL, to_go INTEGER NOT NULL, notes TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'new', created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS order_lines(id INTEGER PRIMARY KEY, order_id INTEGER REFERENCES orders(id), item_id INTEGER, name TEXT NOT NULL, quantity INTEGER NOT NULL, modifiers TEXT NOT NULL DEFAULT '{}');
         CREATE TABLE IF NOT EXISTS print_jobs(id INTEGER PRIMARY KEY, order_id INTEGER REFERENCES orders(id), printer TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, error TEXT DEFAULT '');
+        CREATE TABLE IF NOT EXISTS sections(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, sort_order INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS modifier_groups(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, min_select INTEGER NOT NULL DEFAULT 0, max_select INTEGER NOT NULL DEFAULT 1, required INTEGER NOT NULL DEFAULT 0, sort_order INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS modifier_options(id INTEGER PRIMARY KEY, group_id INTEGER NOT NULL REFERENCES modifier_groups(id) ON DELETE CASCADE, name TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, UNIQUE(group_id,name));
+        CREATE TABLE IF NOT EXISTS item_modifier_groups(item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE, group_id INTEGER NOT NULL REFERENCES modifier_groups(id) ON DELETE CASCADE, PRIMARY KEY(item_id,group_id));
         """)
+        columns={r['name'] for r in c.execute('PRAGMA table_info(items)')}
+        if 'section_id' not in columns:c.execute('ALTER TABLE items ADD COLUMN section_id INTEGER REFERENCES sections(id)')
+        c.execute("UPDATE print_jobs SET status='archived',error='Legacy pre-v0.3 queue entry' WHERE status='pending' AND printer IN ('epson','brother')")
+        if not c.execute('SELECT 1 FROM sections').fetchone():c.execute('INSERT INTO sections(name) VALUES(?)',('Coffee Bar',))
+        c.execute('UPDATE items SET section_id=(SELECT id FROM sections ORDER BY id LIMIT 1) WHERE section_id IS NULL')
         if not c.execute('SELECT 1 FROM users').fetchone():
             pin=os.environ.get('ADMIN_PIN')
             if not pin or len(pin)!=4 or not pin.isdigit(): raise RuntimeError('Set a 4-digit ADMIN_PIN')
@@ -99,12 +118,13 @@ def home(): return render_template('index.html')
 
 @app.post('/api/login')
 def login():
-    body=request.get_json(silent=True) or {}; name=body.get('name',''); pin=str(body.get('pin',''))
+    body=request.get_json(silent=True) or {}; pin=str(body.get('pin',''))
     ip=client_ip()
     if not login_allowed(ip): return jsonify(error='Too many attempts. Try again in five minutes.'),429
     if not valid_pin(pin): login_failed(ip); return jsonify(error='Invalid credentials'),401
-    with db() as c: user=c.execute('SELECT * FROM users WHERE name=?',(name,)).fetchone()
-    if not user or not verify_pin(pin,user['pin_hash']): login_failed(ip); return jsonify(error='Invalid credentials'),401
+    with db() as c: users=c.execute('SELECT * FROM users ORDER BY id').fetchall()
+    user=next((u for u in users if verify_pin(pin,u['pin_hash'])),None)
+    if not user: login_failed(ip); return jsonify(error='Invalid credentials'),401
     LOGIN_ATTEMPTS.pop(ip,None)
     session.clear();session.permanent=True;session.update(uid=user['id'],name=user['name'],role=user['role'],csrf=secrets.token_urlsafe(24))
     return jsonify(id=user['id'],name=user['name'],role=user['role'],csrf=session['csrf'])
@@ -113,6 +133,7 @@ def login():
 def logout(): session.clear();return jsonify(ok=True)
 
 @app.get('/api/users')
+@auth
 def users():
     with db() as c: return jsonify([dict(r) for r in c.execute('SELECT id,name FROM users ORDER BY name')])
 
@@ -126,6 +147,7 @@ def admin_users():
 def add_user():
     b=request.get_json(silent=True) or {}; pin=str(b.get('pin',''));name=str(b.get('name','')).strip();role=b.get('role','customer')
     if not name or len(name)>50 or not valid_pin(pin) or role not in ('customer','admin'):return jsonify(error='Enter a name, role, and 4-digit PIN'),400
+    if pin_owner(pin):return jsonify(error='That PIN is already assigned to another user'),409
     try:
         with db() as c: c.execute('INSERT INTO users(name,pin_hash,role) VALUES(?,?,?)',(name,pin_hash(pin),role))
     except sqlite3.IntegrityError: return jsonify(error='Name already used'),409
@@ -137,6 +159,7 @@ def update_user(user_id):
     b=request.get_json(silent=True) or {}; name=str(b.get('name','')).strip(); role=b.get('role'); pin=str(b.get('pin','')).strip()
     if not name or len(name)>50 or role not in ('customer','admin') or (pin and not valid_pin(pin)):
         return jsonify(error='Enter a name, role, and optional 4-digit PIN'),400
+    if pin and pin_owner(pin,user_id):return jsonify(error='That PIN is already assigned to another user'),409
     with db() as c:
         current=c.execute('SELECT * FROM users WHERE id=?',(user_id,)).fetchone()
         if not current:return jsonify(error='User not found'),404
@@ -167,6 +190,7 @@ def delete_user(user_id):
 def change_pin():
     b=request.get_json(silent=True) or {}; current=str(b.get('current_pin','')); new=str(b.get('new_pin',''))
     if not valid_pin(new):return jsonify(error='New PIN must be four digits'),400
+    if pin_owner(new,session['uid']):return jsonify(error='That PIN is already assigned to another user'),409
     with db() as c:
         user=c.execute('SELECT pin_hash FROM users WHERE id=?',(session['uid'],)).fetchone()
         if not user or not verify_pin(current,user['pin_hash']):return jsonify(error='Current PIN is incorrect'),401
@@ -177,7 +201,37 @@ def change_pin():
 @auth
 def menu():
     with db() as c:
-        return jsonify(categories=[dict(x) for x in c.execute('SELECT * FROM categories ORDER BY sort_order,id')],items=[dict(x) for x in c.execute('SELECT * FROM items ORDER BY id')])
+        groups=[dict(x) for x in c.execute('SELECT * FROM modifier_groups ORDER BY sort_order,id')]
+        for g in groups:g['options']=[dict(x) for x in c.execute('SELECT * FROM modifier_options WHERE group_id=? ORDER BY sort_order,id',(g['id'],))]
+        items=[dict(x) for x in c.execute('SELECT * FROM items ORDER BY id')]
+        for i in items:i['modifier_group_ids']=[r[0] for r in c.execute('SELECT group_id FROM item_modifier_groups WHERE item_id=?',(i['id'],))]
+        return jsonify(sections=[dict(x) for x in c.execute('SELECT * FROM sections ORDER BY sort_order,id')],categories=[dict(x) for x in c.execute('SELECT * FROM categories ORDER BY sort_order,id')],items=items,modifier_groups=groups)
+
+@app.post('/api/sections')
+@admin
+def add_section():
+    b=request.get_json(silent=True) or {};name=str(b.get('name','')).strip()
+    if not name:return jsonify(error='Name required'),400
+    try:
+        with db() as c:c.execute('INSERT INTO sections(name,sort_order) VALUES(?,?)',(name,int(b.get('sort_order',0))))
+    except sqlite3.IntegrityError:return jsonify(error='Section name already used'),409
+    return jsonify(ok=True),201
+
+@app.patch('/api/sections/<int:section_id>')
+@admin
+def update_section(section_id):
+    b=request.get_json(silent=True) or {};name=str(b.get('name','')).strip()
+    if not name:return jsonify(error='Name required'),400
+    with db() as c:c.execute('UPDATE sections SET name=?,sort_order=? WHERE id=?',(name,int(b.get('sort_order',0)),section_id))
+    return jsonify(ok=True)
+
+@app.delete('/api/sections/<int:section_id>')
+@admin
+def delete_section(section_id):
+    with db() as c:
+        if c.execute('SELECT 1 FROM items WHERE section_id=?',(section_id,)).fetchone():return jsonify(error='Move or delete items in this section first'),409
+        c.execute('DELETE FROM sections WHERE id=?',(section_id,))
+    return jsonify(ok=True)
 
 @app.post('/api/categories')
 @admin
@@ -211,18 +265,68 @@ def delete_category(category_id):
 def add_item():
     b=request.get_json(silent=True) or {};name=str(b.get('name','')).strip()
     if not name:return jsonify(error='Name required'),400
-    with db() as c: c.execute('INSERT INTO items(category_id,name,description,image_url) VALUES(?,?,?,?)',(b.get('category_id'),name,b.get('description',''),b.get('image_url','')))
+    with db() as c: c.execute('INSERT INTO items(category_id,section_id,name,description,image_url) VALUES(?,?,?,?,?)',(b.get('category_id'),b.get('section_id'),name,b.get('description',''),b.get('image_url','')))
     return jsonify(ok=True),201
 
 @app.patch('/api/items/<int:item_id>')
 @admin
 def update_item(item_id):
-    b=request.get_json(silent=True) or {};allowed=('name','description','image_url','available','category_id')
+    b=request.get_json(silent=True) or {};allowed=('name','description','image_url','available','category_id','section_id')
     changes={k:v for k,v in b.items() if k in allowed}
     if not changes:return jsonify(error='No changes'),400
     with db() as c:
         cur=c.execute('UPDATE items SET '+','.join(k+'=?' for k in changes)+' WHERE id=?',(*changes.values(),item_id))
         if not cur.rowcount:return jsonify(error='Not found'),404
+    return jsonify(ok=True)
+
+@app.post('/api/modifier-groups')
+@admin
+def add_modifier_group():
+    b=request.get_json(silent=True) or {};name=str(b.get('name','')).strip();mx=int(b.get('max_select',1));mn=int(b.get('min_select',0))
+    if not name or mn<0 or mx<1 or mn>mx:return jsonify(error='Invalid modifier group'),400
+    try:
+        with db() as c:c.execute('INSERT INTO modifier_groups(name,min_select,max_select,required) VALUES(?,?,?,?)',(name,mn,mx,int(bool(b.get('required')))))
+    except sqlite3.IntegrityError:return jsonify(error='Group name already used'),409
+    return jsonify(ok=True),201
+
+@app.patch('/api/modifier-groups/<int:group_id>')
+@admin
+def update_modifier_group(group_id):
+    b=request.get_json(silent=True) or {};name=str(b.get('name','')).strip();mx=int(b.get('max_select',1));mn=int(b.get('min_select',0))
+    if not name or mn<0 or mx<1 or mn>mx:return jsonify(error='Invalid modifier group'),400
+    with db() as c:c.execute('UPDATE modifier_groups SET name=?,min_select=?,max_select=?,required=? WHERE id=?',(name,mn,mx,int(bool(b.get('required'))),group_id))
+    return jsonify(ok=True)
+
+@app.delete('/api/modifier-groups/<int:group_id>')
+@admin
+def delete_modifier_group(group_id):
+    with db() as c:c.execute('DELETE FROM modifier_groups WHERE id=?',(group_id,))
+    return jsonify(ok=True)
+
+@app.post('/api/modifier-groups/<int:group_id>/options')
+@admin
+def add_modifier_option(group_id):
+    name=str((request.get_json(silent=True) or {}).get('name','')).strip()
+    if not name:return jsonify(error='Name required'),400
+    try:
+        with db() as c:c.execute('INSERT INTO modifier_options(group_id,name) VALUES(?,?)',(group_id,name))
+    except sqlite3.IntegrityError:return jsonify(error='Option already exists'),409
+    return jsonify(ok=True),201
+
+@app.delete('/api/modifier-options/<int:option_id>')
+@admin
+def delete_modifier_option(option_id):
+    with db() as c:c.execute('DELETE FROM modifier_options WHERE id=?',(option_id,))
+    return jsonify(ok=True)
+
+@app.put('/api/items/<int:item_id>/modifier-groups')
+@admin
+def set_item_modifier_groups(item_id):
+    ids=(request.get_json(silent=True) or {}).get('group_ids',[])
+    if not isinstance(ids,list):return jsonify(error='group_ids must be a list'),400
+    with db() as c:
+        c.execute('DELETE FROM item_modifier_groups WHERE item_id=?',(item_id,))
+        for gid in set(map(int,ids)):c.execute('INSERT INTO item_modifier_groups(item_id,group_id) VALUES(?,?)',(item_id,gid))
     return jsonify(ok=True)
 
 @app.delete('/api/items/<int:item_id>')
@@ -247,12 +351,27 @@ def order():
                 if not item or not 1<=qty<=20:raise ValueError('Unavailable item or invalid quantity')
                 mods=line.get('modifiers',{})
                 if not isinstance(mods,dict) or len(json.dumps(mods))>2000:raise ValueError('Invalid modifiers')
-                resolved.append((item,qty,mods))
+                resolved_mods={}
+                assigned={r[0] for r in c.execute('SELECT group_id FROM item_modifier_groups WHERE item_id=?',(item['id'],))}
+                for gid in assigned:
+                    group=c.execute('SELECT * FROM modifier_groups WHERE id=?',(gid,)).fetchone(); selected=mods.get(str(gid),mods.get(gid,[]))
+                    if not isinstance(selected,list):raise ValueError('Invalid modifier selection')
+                    selected=list(dict.fromkeys(map(int,selected)))
+                    minimum=max(group['min_select'],1 if group['required'] else 0)
+                    if not minimum<=len(selected)<=group['max_select']:raise ValueError(f"Choose {minimum}-{group['max_select']} for {group['name']}")
+                    if selected:
+                        placeholders=','.join('?' for _ in selected)
+                        names=[r[0] for r in c.execute(f'SELECT name FROM modifier_options WHERE group_id=? AND id IN ({placeholders})',(gid,*selected))]
+                        if len(names)!=len(selected):raise ValueError('Invalid modifier option')
+                        resolved_mods[group['name']]=names
+                unknown=set(map(int,mods.keys()))-assigned if mods else set()
+                if unknown:raise ValueError('Modifier group not assigned to item')
+                resolved.append((item,qty,resolved_mods))
             cur=c.execute('INSERT INTO orders(user_id,customer,to_go,notes,created_at) VALUES(?,?,?,?,?)',(session['uid'],session['name'],int(bool(b.get('to_go',False))),str(b.get('notes',''))[:500],datetime.now(timezone.utc).isoformat()))
             oid=cur.lastrowid
             for item,qty,mods in resolved:c.execute('INSERT INTO order_lines(order_id,item_id,name,quantity,modifiers) VALUES(?,?,?,?,?)',(oid,item['id'],item['name'],qty,json.dumps(mods)))
-            c.execute('INSERT INTO print_jobs(order_id,printer) VALUES(?,?)',(oid,'epson'))
-            if b.get('to_go'):c.execute('INSERT INTO print_jobs(order_id,printer) VALUES(?,?)',(oid,'brother'))
+            c.execute('INSERT INTO print_jobs(order_id,printer) VALUES(?,?)',(oid,'chit'))
+            if b.get('to_go'):c.execute('INSERT INTO print_jobs(order_id,printer) VALUES(?,?)',(oid,'label'))
         return jsonify(id=oid,status='new'),201
     except (ValueError,KeyError,TypeError) as e:return jsonify(error=str(e)),400
 
@@ -276,8 +395,69 @@ def status(oid):
         if not cur.rowcount:return jsonify(error='Order not found'),404
     return jsonify(ok=True)
 
+def order_payload(order_id):
+    with db() as c:
+        order=dict(c.execute('SELECT * FROM orders WHERE id=?',(order_id,)).fetchone())
+        order['lines']=[dict(r) for r in c.execute('SELECT * FROM order_lines WHERE order_id=?',(order_id,))]
+    for line in order['lines']:line['modifiers']=json.loads(line['modifiers'] or '{}')
+    return order
+
+def chit_bytes(order):
+    out=[f"COFFEE ORDER #{order['id']}",order['customer'],datetime.fromisoformat(order['created_at']).astimezone().strftime('%b %d  %I:%M %p'),'TO GO' if order['to_go'] else 'FOR HERE','-'*32]
+    for line in order['lines']:
+        out.append(f"{line['quantity']} x {line['name']}")
+        for group,values in line['modifiers'].items():out.append(f"  {group}: {', '.join(values)}")
+    if order['notes']:out.extend(['-'*32,'NOTE: '+order['notes']])
+    return b'\x1b@\x1ba\x00'+('\n'.join(out)+'\n\n\n').encode('utf-8','replace')+b'\x1dV\x00'
+
+def send_chit(order):
+    if PRINT_MODE=='mock':return
+    if not EPSON_HOST:raise RuntimeError('EPSON_HOST is not configured')
+    with socket.create_connection((EPSON_HOST,EPSON_PORT),timeout=8) as s:s.sendall(chit_bytes(order))
+
+def send_labels(order):
+    if PRINT_MODE=='mock':return
+    for line in order['lines']:
+        mod_text='; '.join(f"{k}: {', '.join(v)}" for k,v in line['modifiers'].items())
+        for _ in range(line['quantity']):
+            text='\n'.join(x for x in [order['customer'],line['name'],mod_text,'TO GO',f"Order #{order['id']}"] if x)
+            data=urlparse.urlencode({'text':text,'font_size':'48','label_size':BROTHER_LABEL_SIZE,'align':'center','orientation':'standard','margin_top':'12','margin_bottom':'12','margin_left':'10','margin_right':'10'}).encode()
+            response=urlrequest.urlopen(urlrequest.Request(BROTHER_URL,data=data,method='POST'),timeout=15)
+            body=json.loads(response.read().decode() or '{}')
+            if not body.get('success'):raise RuntimeError(body.get('message','Brother label print failed'))
+
+def process_print_job(job_id):
+    with db() as c:
+        job=c.execute('SELECT * FROM print_jobs WHERE id=?',(job_id,)).fetchone()
+        if not job:return
+        c.execute("UPDATE print_jobs SET status='printing',attempts=attempts+1,error='' WHERE id=?",(job_id,))
+    try:
+        order=order_payload(job['order_id']); send_chit(order) if job['printer']=='chit' else send_labels(order)
+        with db() as c:c.execute("UPDATE print_jobs SET status='completed' WHERE id=?",(job_id,))
+    except Exception as e:
+        with db() as c:c.execute("UPDATE print_jobs SET status='failed',error=? WHERE id=?",(str(e)[:500],job_id))
+
+def print_worker():
+    while True:
+        try:
+            with db() as c: jobs=[r[0] for r in c.execute("SELECT id FROM print_jobs WHERE status='pending' ORDER BY id LIMIT 10")]
+            for job_id in jobs:process_print_job(job_id)
+        except Exception:pass
+        time.sleep(2)
+
+@app.get('/api/print-jobs')
+@admin
+def print_jobs():
+    with db() as c:return jsonify([dict(r) for r in c.execute('SELECT p.*,o.customer,o.created_at FROM print_jobs p JOIN orders o ON o.id=p.order_id ORDER BY p.id DESC LIMIT 100')])
+
+@app.post('/api/print-jobs/<int:job_id>/retry')
+@admin
+def retry_print_job(job_id):
+    with db() as c:c.execute("UPDATE print_jobs SET status='pending',error='' WHERE id=?",(job_id,))
+    return jsonify(ok=True)
+
 @app.get('/api/health')
 def health():return jsonify(status='ok')
 
-# Print jobs are queued, not dispatched; hardware integration pending.
 init()
+threading.Thread(target=print_worker,daemon=True,name='print-worker').start()

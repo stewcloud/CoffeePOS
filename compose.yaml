@@ -11,7 +11,9 @@ services:
       DB_PATH: /data/coffeepos.db
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       EPSON_HOST: ${EPSON_HOST:-}
-      BROTHER_HOST: ${BROTHER_HOST:-}
+      EPSON_PORT: ${EPSON_PORT:-9100}
+      BROTHER_URL: ${BROTHER_URL:-http://192.168.1.149:8013/api/print/text}
+      BROTHER_LABEL_SIZE: ${BROTHER_LABEL_SIZE:-62}
       PRINT_MODE: ${PRINT_MODE:-mock}
     volumes:
       - ./data:/data

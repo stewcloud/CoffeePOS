@@ -1,6 +1,7 @@
 # Unraid test deployment (v0.1.0)
 
-CoffeePOS currently queues print jobs but does not send them to printers. Keep this test installation LAN-only; do not publish via Cloudflare yet.
+CoffeePOS v0.3 queues and dispatches chits and to-go labels. Start with `PRINT_MODE=mock`,
+verify the Print Jobs page, then use `PRINT_MODE=live` after configuring the printer endpoints.
 
 ## Install
 
@@ -32,8 +33,8 @@ docker compose up -d --build
 
 - Check that host port 8541 is unused before starting.
 - The initial Admin user is created only when the database is empty.
-- For the test release, print jobs remain pending intentionally.
-- Authentication is not hardened for Internet exposure; use only on a trusted LAN.
+- Chits use raw ESC/POS over TCP (`EPSON_HOST`, port 9100 by default).
+- Labels use the `brother-ql-web` text API (`BROTHER_URL`, 62 mm media by default).
 
 ## Rollback
 
