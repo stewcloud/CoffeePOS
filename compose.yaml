@@ -1,0 +1,16 @@
+services:
+  coffeepos:
+    build: .
+    container_name: coffeepos
+    restart: unless-stopped
+    ports:
+      - "8541:8541"
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      ADMIN_PIN: ${ADMIN_PIN:?Set ADMIN_PIN in .env}
+      DB_PATH: /data/coffeepos.db
+      EPSON_HOST: ${EPSON_HOST:-}
+      BROTHER_HOST: ${BROTHER_HOST:-}
+      PRINT_MODE: ${PRINT_MODE:-mock}
+    volumes:
+      - ./data:/data
